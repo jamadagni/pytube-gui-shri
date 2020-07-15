@@ -1,0 +1,279 @@
+#! /usr/bin/env python3
+
+# PyTube GUI Shri
+# ===============
+#
+# Provides a simple PyQt-based GUI front-end to PyTube
+#
+# Copyright © 2020, Shriramana Sharma, samjnaa-at-gmail-dot-com
+#
+# Use, modification and distribution are permitted subject to the
+# "BSD-2-Clause"-type license stated in the accompanying file LICENSE.txt
+
+
+from sys import argv
+if len(argv) > 2:
+    exit("USAGE: pytube-gui-shri [<url>]")
+url = argv[1] if len(argv) == 2 else None
+
+
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
+from PyQt5.QtWidgets import *
+
+
+def horizontalLayout(*widgets):
+    l = QHBoxLayout()
+    for w in widgets:
+        l.addWidget(w)
+    return l
+
+
+def populateTreeWidget(treeWidget, filteredStreams, subtreeField, extraFields):
+    curSubtreeValue = None
+    curSubtree = None
+    for stream in filteredStreams.order_by(subtreeField).desc():
+        thisSubtreeValue = getattr(stream, subtreeField)
+        if thisSubtreeValue != curSubtreeValue:
+            curSubtreeValue = thisSubtreeValue
+            curSubtree = QTreeWidgetItem()
+            curSubtree.setText(0, curSubtreeValue)
+            treeWidget.addTopLevelItem(curSubtree)
+        item = QTreeWidgetItem(curSubtree)
+        item.setText(1, str(stream.itag))
+        item.setText(2, stream.mime_type.split("/")[1])
+        for i, extraField in enumerate(extraFields):
+            item.setText(3 + i, str(getattr(stream, extraField)))
+
+
+class MainWindow(QWidget):
+
+    def __init__(self, parent = None):
+
+        super().__init__(parent)
+
+        l = self.urlLabel = QLabel("&URL:")
+        w = self.urlEdit = QLineEdit()
+        l.setBuddy(w)
+        w = self.urlLoadButton = QPushButton("&Load")
+        w.setDefault(True)
+        self.urlLayout = horizontalLayout(self.urlLabel, self.urlEdit, self.urlLoadButton)
+
+        self.unifiedStreamButton = QRadioButton("U&nified streams:")
+
+        w = self.unifiedStreamList = QTreeWidget()
+        # itag="18" mime_type="video/mp4" res="360p" fps="30fps" vcodec="avc1.42001E" acodec="mp4a.40.2" progressive="True" type="video"
+        # tree based on "resolution"
+        w.setHeaderLabels(["resolution", "itag", "container", "fps", "vcodec", "acodec"])
+
+        self.separateStreamButton = QRadioButton("S&eparate streams:")
+
+        l = self.separateVideoLabel = QLabel("&Video:")
+        w = self.separateVideoStreamList = QTreeWidget()
+        # itag="137" mime_type="video/mp4" res="1080p" fps="30fps" vcodec="avc1.640028" progressive="False" type="video"
+        # tree based on "resolution"
+        w.setHeaderLabels(["resolution", "itag", "container", "fps", "vcodec"])
+        l.setBuddy(w)
+
+        l = self.separateAudioLabel = QLabel("&Audio:")
+        w = self.separateAudioStreamList = QTreeWidget()
+        # itag="140" mime_type="audio/mp4" abr="128kbps" acodec="mp4a.40.2" progressive="False" type="audio"
+        # tree based on "bitrate"
+        w.setHeaderLabels(["bitrate", "itag", "container", "acodec"])
+        l.setBuddy(w)
+
+        self.saveAsButton = QPushButton("&Save")
+        self.saveProgressBar = QProgressBar()
+
+        self.mainLayoutContents = (self.urlLayout,
+                  None,
+                  self.unifiedStreamButton,
+                  self.unifiedStreamList,
+                  None,
+                  self.separateStreamButton,
+                  self.separateVideoLabel, self.separateVideoStreamList,
+                  self.separateAudioLabel, self.separateAudioStreamList,
+                  None,
+                  self.saveAsButton, self.saveProgressBar)
+
+        l = self.layout = QVBoxLayout()
+        for w in self.mainLayoutContents:
+            if isinstance(w, QWidget):
+                l.addWidget(w)
+            elif isinstance(w, QLayout):
+                l.addLayout(w)
+            elif w is None:
+                l.addStretch(1)
+
+        self.setLayout(self.layout)
+        self.setWindowTitle("PyTube GUI Shri")
+
+        self.urlEdit.textChanged.connect(self.disableStreamSelection)
+        self.urlLoadButton.clicked.connect(self.loadUrl)
+        self.saveAsButton.clicked.connect(self.save)
+
+        for w in self.unifiedStreamButton, self.separateStreamButton:
+            w.toggled.connect(self.enableUnifiedOrSeparateStreamSelection)
+
+        self.separateStreamButton.setChecked(True)
+        if url:
+            self.urlEdit.setText(url)
+            self.loadUrl()
+
+    def enableUnifiedOrSeparateStreamSelection(self):
+        self.unifiedStreamList.setEnabled(self.unifiedStreamButton.isChecked())
+        separate = self.separateStreamButton.isChecked()
+        for w in self.separateVideoLabel, self.separateVideoStreamList, self.separateAudioLabel, self.separateAudioStreamList:
+            w.setEnabled(separate)
+
+    def enableStreamSelection(self, value):
+        for w in self.mainLayoutContents:
+            if isinstance(w, QWidget):
+                w.setEnabled(value)
+        if value:
+            self.enableUnifiedOrSeparateStreamSelection()
+
+    def disableStreamSelection(self):
+        self.enableStreamSelection(False)
+
+    def loadUrl(self):
+
+        for tw in self.unifiedStreamList, self.separateVideoStreamList, self.separateAudioStreamList:
+            tw.clear()
+
+        from pytube import YouTube
+        try:
+            self.yt = YouTube(self.urlEdit.text())
+        except Exception as e:
+            self.errorMsg("Error while loading given URL:\n\n{}".format(e))
+            return
+        self.yt.register_on_progress_callback(self.updateProgressBar)
+
+        populateTreeWidget(self.unifiedStreamList, self.yt.streams.filter(progressive = True), "resolution", ["fps", "video_codec", "audio_codec"])
+        populateTreeWidget(self.separateVideoStreamList, self.yt.streams.filter(only_video = True), "resolution", ["fps", "video_codec"])
+        populateTreeWidget(self.separateAudioStreamList, self.yt.streams.filter(only_audio = True), "abr", ["audio_codec"])
+
+        self.enableStreamSelection(True)
+
+    def save(self):
+
+        def valid(item):
+            return not(item is None or item.text(1) == "")
+
+        if self.unifiedStreamButton.isChecked():
+            curItem = self.unifiedStreamList.currentItem()
+            if not valid(curItem):
+                self.errorMsg("No unified audio/video stream selected")
+                return
+        else:
+            curVideoItem = self.separateVideoStreamList.currentItem()
+            curAudioItem = self.separateAudioStreamList.currentItem()
+            validCurVideoItem = valid(curVideoItem)
+            validCurAudioItem = valid(curAudioItem)
+            if not validCurVideoItem and not validCurAudioItem:
+                self.errorMsg("No separate audio/video stream selected")
+                return
+            if validCurVideoItem and validCurAudioItem:
+                self.saveAndMerge(curVideoItem, curAudioItem)
+                return
+            # only one stream selected
+            if QMessageBox.question(self, "Confirmation", "Only {} stream is selected. Proceed with download?".format("a video" if valid(curVideoItem) else "an audio")) == QMessageBox.No:
+                return
+            if curVideoItem:
+                curItem = curVideoItem
+            if curAudioItem:
+                curItem = curAudioItem
+
+        itag = int(curItem.text(1))
+        container = curItem.text(2)
+        ofilePath = self.getOutputFile(container)
+        if not ofilePath:
+            return
+
+        self.bytesDloadedInPrevStream = 0
+        self.saveProgressBar.setValue(0)
+        self.bytesInCurStream = self.getStream(itag).filesize
+        self.saveProgressBar.setMaximum(self.bytesInCurStream)
+        self.saveItagToFile(itag, ofilePath)
+
+        QMessageBox.information(self, "Success", "Successfully saved the chosen stream to {}".format(ofilePath))
+
+    def saveAndMerge(self, curVideoItem, curAudioItem):
+
+        from tempfile import NamedTemporaryFile
+        from os import remove as rm
+        from subprocess import run
+
+        videoItag = int(curVideoItem.text(1))
+        videoContainer = curVideoItem.text(2)
+        videoBytes = self.getStream(videoItag).filesize
+        tempVideoFile = NamedTemporaryFile(suffix = "." + videoContainer, delete = False)
+        tempVideoFile.close()  # to portably enable opening by later command
+
+        audioItag = int(curAudioItem.text(1))
+        audioContainer = curAudioItem.text(2)
+        audioBytes = self.getStream(audioItag).filesize
+        tempAudioFile = NamedTemporaryFile(suffix = "." + audioContainer, delete = False)
+        tempAudioFile.close()  # to portably enable opening by later command
+
+        self.saveProgressBar.setValue(0)
+        self.saveProgressBar.setMaximum(videoBytes + audioBytes)
+
+        self.bytesDloadedInPrevStream = 0
+        self.bytesInCurStream = videoBytes
+        try:
+            self.saveItagToFile(videoItag, tempVideoFile.name)
+        except Exception as e:
+            self.errorMsg(str(e))
+            return
+
+        self.bytesDloadedInPrevStream = videoBytes
+        self.bytesInCurStream = audioBytes
+        try:
+            self.saveItagToFile(audioItag, tempAudioFile.name)
+        except Exception as e:
+            self.errorMsg(str(e))
+            return
+
+        if videoContainer == audioContainer:
+            targetContainer = videoContainer
+        else:
+            targetContainer, accepted = QInputDialog.getItem(self, "Choose container",
+                                                             "The video and audio streams chosen have different containers. Choose one for the merged file:",
+                                                             [videoContainer, audioContainer], editable = False)
+            if not accepted:
+                return
+
+        ofilePath = self.getOutputFile(targetContainer)
+        if not ofilePath:
+            return
+
+        try:
+            run(["ffmpeg", "-hide_banner", "-i", tempVideoFile.name, "-i", tempAudioFile.name, "-c", "copy", ofilePath], check = True)
+        except Exception as e:
+            self.errorMsg(str(e))
+            return
+
+        QMessageBox.information(self, "Success", "Successfully saved the merged video and audio streams to {}".format(ofilePath))
+
+    def getOutputFile(self, extension):
+        return QFileDialog.getSaveFileName(self, "Choose filename", QDir.homePath(), "{0} files (*.{0})".format(extension))[0]
+
+    def updateProgressBar(self, stream, chunk, bytesRemaining):
+        self.saveProgressBar.setValue(self.bytesDloadedInPrevStream + self.bytesInCurStream - bytesRemaining)
+
+    def saveItagToFile(self, itag, filePath):
+        fileInfo = QFileInfo(filePath[:-4])
+        self.getStream(itag).download(output_path = fileInfo.dir().path(), filename = fileInfo.baseName())
+
+    def getStream(self, itag):
+        return self.yt.streams.get_by_itag(itag)
+
+    def errorMsg(self, message):
+        QMessageBox.critical(self, "Error", message)
+
+
+app = QApplication([])
+mainWindow = MainWindow()
+mainWindow.show()
+app.exec_()
